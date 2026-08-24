@@ -1,7 +1,7 @@
 # Overcomplicating a Bonezegei GET Request
 
 ## The Bonezegei Scripting Language (BSL)
-The Bonezegei Scripting Language (BSL) is a minimalistic, esoteric scripting language utilized in this project to strictly handle the backend operations. By design, BSL acts as a bare-bones environment. In this project, BSL is used to load a native C-like extension (`http/http.so`), manually register an HTTP server (`createHTTPServer()`), and bind a `select()` event loop to port `8080`. Its sole responsibility is to serve static payloads out of the `./public` directory.
+The [Bonezegei Scripting Language (BSL)](https://github.com/bonezegei/Bonezegei_Scripting_Language) is a minimalistic, esoteric scripting language utilized in this project to strictly handle the backend operations. By design, BSL acts as a bare-bones environment. In this project, BSL is used to load a native C-like extension (`http/http.so`), manually register an HTTP server (`createHTTPServer()`), and bind a `select()` event loop to port `8080`. Its sole responsibility is to serve static payloads out of the `./public` directory.
 
 ### BSL vs JavaScript (Node.js)
 If this backend had been built with JavaScript (e.g., using Node.js), the implementation would differ drastically:
@@ -11,8 +11,8 @@ If this backend had been built with JavaScript (e.g., using Node.js), the implem
 
 ## Screenshots
 
-![Boot Logs](Logs.png)
-![Fastfetch Output](fastfetch.png)
+![Boot Logs](screenshots/Logs.png)
+![Fastfetch Output](screenshots/fastfetch.png)
 
 ## Tech Stack
 - **Backend:** Bonezegei Scripting Language (BSL v1.3.1)
@@ -21,7 +21,7 @@ If this backend had been built with JavaScript (e.g., using Node.js), the implem
 - **Environment:** NixOS Host / Ubuntu Distrobox
 
 ## How to Install and Run
-1. Ensure the **Bonezegei Script Interpreter** (`bonezegei`) is installed and available in your system's `PATH`.
+1. Ensure the **[Bonezegei Script Interpreter](https://github.com/bonezegei/Bonezegei_Scripting_Language)** (`bonezegei`) is installed and available in your system's `PATH`.
 2. Clone this repository.
 3. Start the server using the Bonezegei CLI:
    ```bash

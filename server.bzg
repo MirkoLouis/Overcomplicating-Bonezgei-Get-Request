@@ -1,0 +1,33 @@
+// ============================================================
+//  server.bzg — BSL HTTP GET Server
+//  Assignment: Serve index.html via HTTP/1.1 GET on port 8080
+//
+//  Requires: lib/http.bzg  (installed by: bzg install http)
+//  Usage:    bonezegei server.bzg
+// ============================================================
+
+// Step 1: Load the BSL http library.
+//   loadNative("http/http.so", "createHTTPServer") is called,
+//   which registers the createHTTPServer() native function.
+setIncludeBase(".");
+include("lib/http.bzg");
+
+// Step 2: Create the server object and configure it.
+//   .resources(path) — sets the static file directory to serve from.
+//   GET / automatically resolves to public/index.html.
+//   GET /foo         resolves to public/foo (or 404).
+var server = createHTTPServer();
+server.resources("./public");
+
+// Step 3: Start serving (BLOCKING — native select() event loop).
+//   The server binds to 0.0.0.0:8080 and responds to every
+//   HTTP GET request with the matching file from ./public/.
+//
+//   Response for GET /:
+//     HTTP/1.1 200 OK
+//     Server: BSL-Static-Server/1.0
+//     Content-Type: text/html; charset=utf-8
+//     Content-Length: <n>
+//     Connection: close
+//     <contents of public/index.html>
+server.start();

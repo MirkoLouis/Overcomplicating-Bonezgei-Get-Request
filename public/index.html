@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bonezegei Linux — tty1</title>
+  <style>
+    /* ── HARD RESET ─────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    /* ── SCREEN ─────────────────────────────────────────────── */
+    html, body {
+      width: 100%; height: 100vh;
+      overflow: hidden;             /* NO scrollbar, ever */
+      background: #000;
+      color: #c8c8c8;
+      font-family: "Courier New", Courier, monospace;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    /* CRT scanlines */
+    body::before {
+      content: "";
+      pointer-events: none;
+      position: fixed; inset: 0; z-index: 999;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0px, transparent 2px,
+        rgba(0,0,0,.12) 2px, rgba(0,0,0,.12) 3px
+      );
+    }
+
+    /* ── TTY WRAPPER ────────────────────────────────────────── */
+    #tty {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      padding: 4px 8px;
+    }
+
+    /* ── LOG AREA (FIFO viewport) ───────────────────────────── */
+    #log {
+      flex: 1 1 auto;
+      overflow: hidden;             /* lines fall off the top */
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;   /* content anchored to bottom */
+    }
+
+    .line {
+      display: block;
+      white-space: pre-wrap;
+      word-break: break-all;
+      min-height: 1.45em;
+    }
+
+    /* ── INPUT ROW (sticky bottom) ───────────────────────────── */
+    #input-row {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: baseline;
+      padding-top: 1px;
+    }
+
+    #prompt-label {
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    #cmd-input {
+      flex: 1 1 auto;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: #c8c8c8;
+      font: inherit;
+      caret-color: #c8c8c8;
+      padding: 0;
+      margin: 0;
+    }
+
+    /* ── COLOURS ─────────────────────────────────────────────── */
+    .k  { color: #5f8700; }   /* kernel timestamp dim */
+    .kb { color: #afd700; }   /* kernel body */
+    .sd { color: #5f87af; }   /* systemd dim */
+    .sb { color: #87afff; }   /* systemd body */
+    .ok { color: #00af5f; }   /* green OK */
+    .er { color: #d70000; }   /* red fail */
+    .wn { color: #d78700; }   /* amber warn */
+    .in { color: #00afaf; }   /* cyan info */
+    .br { color: #eeeeee; }   /* bright white */
+    .pu { color: #875fd7; }   /* purple (nix store) */
+    .gr { color: #767676; }   /* grey muted */
+
+    /* login banner */
+    .banner { color: #00afaf; font-weight: bold; }
+    .user   { color: #afd700; }
+    .host   { color: #00afaf; }
+    .path   { color: #0087ff; }
+    .dollar { color: #eeeeee; }
+  </style>
+</head>
+<body>
+<div id="tty">
+  <div id="log"></div>
+  <div id="input-row" style="display:none;">
+    <span id="prompt-label"></span>
+    <input id="cmd-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+  </div>
+</div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════
+   TTY ENGINE
+   ════════════════════════════════════════════════════════════════ */
+const logEl  = document.getElementById('log');
+const rowEl  = document.getElementById('input-row');
+const prompt = document.getElementById('prompt-label');
+const input  = document.getElementById('cmd-input');
+
+/* How many lines to keep visible at once (FIFO trim) */
+const MAX_LINES = Math.floor((window.innerHeight - 28) / (13 * 1.45)) + 4;
+
+/* Push a rendered HTML line into the log area, trim oldest if needed */
+function push(html) {
+  const el = document.createElement('span');
+  el.className = 'line';
+  el.innerHTML = html;
+  logEl.appendChild(el);
+  while (logEl.children.length > MAX_LINES) {
+    logEl.removeChild(logEl.firstChild);
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════
+   BOOT LOG DATA  (lifted from real journalctl -b output)
+   Each entry: [ delayMs, htmlString ]
+   ════════════════════════════════════════════════════════════════ */
+
+/* Helper: dim kernel prefix */
+function kl(ts, body) {
+  return `<span class="k">[${ts}]</span> <span class="kb">${body}</span>`;
+}
+/* Helper: systemd line */
+function sl(host, unit, body, cls) {
+  cls = cls || 'sb';
+  return `<span class="sd">${host} ${unit}:</span> <span class="${cls}">${body}</span>`;
+}
+
+const H = 'MirkoInNIXOS';
+
+/* Kernel lines — real timestamps and content from previous_boot.txt */
+const KERNEL_LINES = [
+  kl('    0.000000', 'Linux version 7.1.8-cachyos (nixbld@localhost) (clang version 22.1.8, LLD 22.1.8) #1-NixOS SMP PREEMPT_DYNAMIC'),
+  kl('    0.000000', 'Command line: initrd=\\EFI\\nixos\\pdr3hbn...-initrd.efi init=/nix/store/3s903l.../init root=fstab loglevel=4 lsm=landlock,yama,bpf'),
+  kl('    0.000001', 'BIOS-provided physical RAM map:'),
+  kl('    0.000001', 'BIOS-e820: [mem 0x0000000000000000-0x000000000009efff]  System RAM'),
+  kl('    0.000001', 'BIOS-e820: [mem 0x0000000000100000-0x0000000065198fff]  System RAM'),
+  kl('    0.000001', 'BIOS-e820: [mem 0x0000000065199000-0x0000000065a98fff]  device reserved'),
+  kl('    0.000001', 'BIOS-e820: [mem 0x0000000065a99000-0x00000000678aefff]  System RAM'),
+  kl('    0.000001', 'BIOS-e820: [mem 0x000000006a000000-0x000000006dffffff]  device reserved'),
+  kl('    0.000001', 'BIOS-e820: [mem 0x0000000100000000-0x000000048b7fffff]  System RAM'),
+  kl('    0.000012', 'NX (Execute Disable) protection: active'),
+  kl('    0.000015', 'APIC: Static calls initialized'),
+  kl('    0.000022', 'efi: EFI v2.7 by INSYDE Corp.'),
+  kl('    0.000022', 'efi: ACPI=0x69ffe000 ACPI 2.0=0x69ffe014 TPMFinalLog=0x69ea5000 SMBIOS=0x67e63000 MEMATTR=0x6101c018'),
+  kl('    0.000031', 'random: crng init done'),
+  kl('    0.000080', 'DMI: MACHENIKE F117-7/NP55HH_J_K-HMx, BIOS 1.07.05TQLM5 11/10/2021'),
+  kl('    0.000080', 'DMI: Memory slots populated: 2/2'),
+  kl('    0.000095', 'tsc: Detected 2600.000 MHz processor'),
+  kl('    0.000095', 'tsc: Detected 2611.200 MHz TSC'),
+  kl('    0.000110', 'x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT'),
+  kl('    0.000140', 'Secure boot disabled'),
+  kl('    0.000145', 'RAMDISK: [mem 0x5913b000-0x5ba8bfff]'),
+  kl('    0.000155', 'ACPI: RSDP 0x0000000069FFE014 000024 (v02 INSYDE)'),
+  kl('    0.000160', 'ACPI: FACP 0x0000000069FDB000 000114 (v06 INSYDE TGL-ULT  00000002 ACPI 00040000)'),
+  kl('    0.000165', 'ACPI: DSDT 0x0000000069F82000 055101 (v02 INSYDE TGL-ULT  00000002 ACPI 00040000)'),
+  kl('    0.000190', 'No NUMA configuration found'),
+  kl('    0.000200', 'NODE_DATA(0) allocated [mem 0x48b7d4f80-0x48b7fffff]'),
+  kl('    0.000220', 'ACPI: PM-Timer IO Port: 0x1808'),
+  kl('    0.000250', 'IOAPIC[0]: apic_id 2, version 32, address 0xfec00000, GSI 0-119'),
+  kl('    0.000280', 'TSC deadline timer available'),
+  kl('    0.000290', 'CPU topo: Num. cores per package: 6'),
+  kl('    0.000290', 'CPU topo: Num. threads per package: 12'),
+  kl('    0.000290', 'CPU topo: Allowing 12 present CPUs plus 0 hotplug CPUs'),
+  kl('    0.000310', 'Zone ranges:'),
+  kl('    0.000310', '  DMA      [mem 0x0000000000001000-0x0000000000ffffff]'),
+  kl('    0.000310', '  DMA32    [mem 0x0000000001000000-0x00000000ffffffff]'),
+  kl('    0.000310', '  Normal   [mem 0x0000000100000000-0x000000048b7fffff]'),
+  kl('    0.000330', 'Built 1 zonelists, mobility grouping on.  Total pages: 4138830'),
+  kl('    0.000350', 'SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=12, Nodes=1'),
+  kl('    0.000420', 'Dynamic Preempt: full'),
+  kl('    0.000440', 'rcu: Preemptible hierarchical RCU implementation.'),
+  kl('    0.000450', 'rcu:         RCU restricting CPUs from NR_CPUS=8192 to nr_cpu_ids=12.'),
+  kl('    0.000460', 'NR_IRQS: 524544, nr_irqs: 2152, preallocated irqs: 16'),
+  kl('    0.000480', 'Console: colour dummy device 80x25'),
+  kl('    0.000490', 'printk: legacy console [tty0] enabled'),
+  kl('    0.000510', 'ACPI: Core revision 20251212'),
+  kl('    0.000530', 'clocksource: hpet: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 99544814920 ns'),
+  kl('    0.000550', 'APIC: Switch to symmetric I/O mode setup'),
+  kl('    0.001042', '..TIMER: vector=0x30 apic1=0 pin1=2 apic2=-1 pin2=-1'),
+  kl('    0.001200', 'Calibrating delay loop (skipped).. 5222.40 BogoMIPS (lpj=2611200)'),
+  kl('    0.001300', 'CPU0: Thermal monitoring enabled (TM1)'),
+  kl('    0.001320', 'x86/cpu: User Mode Instruction Prevention (UMIP) activated'),
+  kl('    0.001350', 'CET detected: Indirect Branch Tracking enabled'),
+  kl('    0.001380', 'Speculative Store Bypass: Mitigation: Speculative Store Bypass disabled via prctl'),
+  kl('    0.001400', 'Spectre V2 : Mitigation: Enhanced / Automatic IBRS'),
+  kl('    0.001410', 'Spectre V1 : Mitigation: usercopy/swapgs barriers and __user pointer sanitization'),
+  kl('    0.001420', 'GDS: Mitigation: Microcode'),
+  kl('    0.001430', 'landlock: Up and running.'),
+  kl('    0.001440', 'Yama: becoming mindful.'),
+  kl('    0.001450', 'LSM support for eBPF active'),
+  kl('    0.001500', 'Mount-cache hash table entries: 32768 (order: 6, 262144 bytes, linear)'),
+  kl('    0.001510', 'VFS: Finished mounting rootfs on nullfs'),
+  kl('    0.001540', 'smpboot: CPU0: 11th Gen Intel(R) Core(TM) i5-11260H @ 2.60GHz (family: 0x6, model: 0x8d, stepping: 0x1)'),
+  kl('    0.001600', 'smp: Bringing up secondary CPUs ...'),
+  kl('    0.001610', '.... node  #0, CPUs:        #1  #2  #3  #4  #5  #6  #7  #8  #9 #10 #11'),
+  kl('    0.001700', 'smp: Brought up 1 node, 12 CPUs'),
+  kl('    0.001720', 'smpboot: Total of 12 processors activated (62668.80 BogoMIPS)'),
+  kl('    0.001800', 'Memory: 15976540K/16555320K available (21802K kernel code, 2910K rwdata, 16956K rodata)'),
+  kl('    0.001850', 'devtmpfs: initialized'),
+  kl('    0.001900', 'ACPI: PM: Registering ACPI NVS region [mem 0x696ff000-0x69f2efff] (8585216 bytes)'),
+  kl('    0.002100', 'PM: RTC time: 08:18:52, date: 2026-08-24'),
+  kl('    0.002150', 'NET: Registered PF_NETLINK/PF_ROUTE protocol family'),
+  kl('    0.002300', 'SCSI subsystem initialized'),
+  kl('    0.002310', 'libata version 3.00 loaded.'),
+  kl('    0.002320', 'ACPI: bus type USB registered'),
+  kl('    0.002330', 'usbcore: registered new interface driver usbfs'),
+  kl('    0.002340', 'usbcore: registered new device driver usb'),
+  kl('    0.002400', 'ACPI: Using IOAPIC for interrupt routing'),
+  kl('    0.002500', 'iommu: Default domain type: Translated'),
+  kl('    0.002510', 'iommu: DMA domain TLB invalidation policy: lazy mode'),
+  kl('    0.003100', 'pci 0000:02:00.0: [10ec:8168] type 00 class 0x020000 PCIe Endpoint'),
+  kl('    0.003200', 'pci 0000:04:00.0: [1e95:9100] type 00 class 0x010802 PCIe Endpoint'),
+  kl('    0.003500', 'ACPI: EC: interrupt unblocked'),
+  kl('    0.003510', 'ACPI: EC: event unblocked'),
+  kl('    0.003600', 'clocksource: Switched to clocksource tsc'),
+  kl('    0.003700', 'NET: Registered PF_INET protocol family'),
+  kl('    0.003720', 'NET: Registered PF_INET6 protocol family'),
+  kl('    0.003800', 'Segment Routing with IPv6'),
+  kl('    0.003810', 'In-situ OAM (IOAM) with IPv6'),
+  kl('    0.003900', 'NET: Registered PF_PACKET protocol family'),
+  kl('    0.004000', 'microcode: Current revision: 0x0000005e'),
+  kl('    0.004050', 'microcode: Updated early from: 0x00000052'),
+  kl('    0.004100', 'Freeing unused kernel image (initmem) memory: 2340K'),
+  kl('    0.004200', 'Write protecting the kernel read-only data: 26624k'),
+  kl('    0.004300', 'x86/mm: Checked W+X mappings: passed, no W+X pages found.'),
+  kl('    0.004400', 'Run /init as init process'),
+  kl('    0.004450', '  with arguments:'),
+  kl('    0.004460', '    /init'),
+  kl('    0.004470', '  with environment:'),
+  kl('    0.004480', '    HOME=/'),
+  kl('    0.004490', '    TERM=linux'),
+  kl('    0.010000', 'EXT4-fs (nvme0n1p2): mounted filesystem with ordered data mode. Quota mode: none.'),
+  kl('    0.010100', 'EXT4-fs (nvme0n1p1): mounted filesystem with ordered data mode. Quota mode: none.'),
+  kl('    0.010200', `<span class="pu">Loading /nix/store/3s903l245q0zcn1hgrq9rfzkpfzfh7h7-nixos-system-MirkoInNIXOS-26.11.20260817.ec2d622/init</span>`),
+];
+
+/* systemd-style boot lines */
+const SD_LINES = [
+  `<span class="in">         Bonezegei Linux ${new Date().toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric', year:'numeric'})}</span>`,
+  `<span class="gr">         Powered by NixOS | Linux 7.1.8-cachyos | systemd 257.3</span>`,
+  '',
+  `<span class="ok">  OK  </span> <span class="sd">Created slice</span> <span class="sb">Slice /system/modprobe.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Listening on</span> <span class="sb">Journal Socket.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Listening on</span> <span class="sb">udev Kernel Socket.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Mounted</span> <span class="sb">/sys/kernel/config.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Mounted</span> <span class="sb">/sys/kernel/debug.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Mounted</span> <span class="sb">/sys/kernel/tracing.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Mounted</span> <span class="sb">/sys/fs/pstore.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Mounted</span> <span class="sb">Huge Pages File System.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Mounted</span> <span class="sb">POSIX Message Queue File System.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Mounted</span> <span class="sb">/tmp.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">systemd-journald.service - Journal Service...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">systemd-journald.service - Journal Service.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">Load Kernel Modules...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">Apply Kernel Variables...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Mounting</span> <span class="sb">/proc/sys/fs/binfmt_misc...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">Create Static Device Nodes in /dev...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">Load Kernel Modules.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">Apply Kernel Variables.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Mounted</span> <span class="sb">/proc/sys/fs/binfmt_misc.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">Create Static Device Nodes in /dev.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">systemd-udevd.service - Rule-based Manager for Device Events...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">systemd-udevd.service - Rule-based Manager for Device Events.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">Coldplug Devices...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">Coldplug Devices.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">Local File Systems...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Mounted</span> <span class="sb">/nix/store on overlay.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Mounted</span> <span class="sb">/boot (vfat) on /dev/nvme0n1p1.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">Local File Systems.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">Nix Daemon...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">D-Bus System Message Bus...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">D-Bus System Message Bus.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">Network Manager...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">Nix Daemon.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">Set Hostname...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Finished</span> <span class="sb">Set Hostname.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">Accounts Service...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">Network Manager.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">Network Manager Wait Online...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">Bluetooth service...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">Bluetooth service.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">OpenSSH Daemon...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">OpenSSH Daemon.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">Accounts Service.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">RealtimeKit Scheduling Policy Service...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">RealtimeKit Scheduling Policy Service.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">Power Profiles daemon...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">Power Profiles daemon.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">ClamAV virus database updater (freshclam)...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">Network Manager Wait Online.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Reached target</span> <span class="sb">Network.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Reached target</span> <span class="sb">Host and Network Name Lookups.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">System Security Services Daemon...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">System Security Services Daemon.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">Disk Manager...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">Disk Manager.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">ClamAV virus database updater (freshclam).</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Reached target</span> <span class="sb">Sound Card.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Reached target</span> <span class="sb">Bluetooth Support.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Reached target</span> <span class="sb">Preparation for Local File Systems Completed.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Reached target</span> <span class="sb">System Time Set.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Starting</span> <span class="sb">getty@tty1.service - Getty on tty1...</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Started</span> <span class="sb">getty@tty1.service - Getty on tty1.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Reached target</span> <span class="sb">Login Prompts.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Reached target</span> <span class="sb">Multi-User System.</span>`,
+  `<span class="ok">  OK  </span> <span class="sd">Reached target</span> <span class="sb">Graphical Interface.</span>`,
+];
+
+/* BSL server startup lines */
+const BSL_LINES = [
+  '',
+  `<span class="gr">─────────────────────────────────────────────────────────────────────</span>`,
+  `<span class="in">[BSL]</span> <span class="br">Bonezegei Script Interpreter v1.3.1</span> <span class="gr">(linux x86_64)</span>`,
+  `<span class="in">[BSL]</span> loading native: <span class="wn">http/http.so</span> → <span class="ok">OK</span>`,
+  `<span class="in">[BSL]</span> registering: <span class="wn">createHTTPServer()</span>`,
+  `<span class="in">[BSL]</span> executing: <span class="wn">server.bzg</span>`,
+  `<span class="ok">[HTTP]</span> static dir: <span class="wn">./public</span>`,
+  `<span class="ok">[HTTP]</span> <span class="br">BSL-Static-Server/1.0 listening on</span> <span class="in">http://0.0.0.0:8080</span>`,
+  `<span class="ok">[HTTP]</span> <span class="gr">select() event loop active</span>`,
+];
+
+/* ════════════════════════════════════════════════════════════════
+   SCHEDULER — drip-feed lines with realistic timing
+   ════════════════════════════════════════════════════════════════ */
+let queue = [];
+let running = false;
+
+function enqueue(lines, baseDelay, jitter) {
+  lines.forEach((html, i) => {
+    queue.push({ html, delay: baseDelay + Math.random() * jitter });
+  });
+}
+
+function runQueue(onDone) {
+  if (queue.length === 0) { if (onDone) onDone(); return; }
+  const item = queue.shift();
+  push(item.html);
+  setTimeout(() => runQueue(onDone), item.delay);
+}
+
+/* ════════════════════════════════════════════════════════════════
+   LOGIN BANNER + SHELL PROMPT
+   ════════════════════════════════════════════════════════════════ */
+function showLoginBanner() {
+  push('');
+  push(`<span class="banner">Bonezegei Linux</span> <span class="gr">tty1</span>`);
+  push('');
+
+  setTimeout(() => {
+    push(`<span class="br">mirkolouis login: </span><span class="user">mirkolouis</span>`);
+    setTimeout(() => {
+      push(`<span class="gr">Last login: Sun Aug 24 06:38:20 2026 on tty1</span>`);
+      setTimeout(() => {
+        push('');
+        /* run BSL server "boot" */
+        const bslQ = BSL_LINES.map(h => ({ html: h, delay: 80 }));
+        queue = bslQ;
+        runQueue(() => {
+          setTimeout(showShell, 300);
+        });
+      }, 400);
+    }, 600);
+  }, 500);
+}
+
+function showShell() {
+  push('');
+  /* Build prompt HTML for the log line (already-entered) */
+  const promptHtml =
+    `<span class="user">mirkolouis</span><span class="gr">@</span><span class="host">bonezegei-linux</span><span class="gr">:</span><span class="path">~</span><span class="dollar">$</span> ` +
+    `<span class="wn">bonezegei server.bzg</span>`;
+  push(promptHtml);
+
+  /* Now show the interactive prompt */
+  showPrompt();
+}
+
+function showPrompt() {
+  prompt.innerHTML =
+    `<span class="user">mirkolouis</span><span class="gr">@</span><span class="host">bonezegei-linux</span><span class="gr">:</span><span class="path">~</span><span class="dollar">$</span>&nbsp;`;
+  rowEl.style.display = 'flex';
+  input.value = '';
+  input.focus();
+}
+
+/* ════════════════════════════════════════════════════════════════
+   COMMAND HANDLER
+   ════════════════════════════════════════════════════════════════ */
+input.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+
+  const cmd = input.value.trim().toLowerCase();
+
+  /* Echo the command typed into the log */
+  const echoHtml =
+    `<span class="user">mirkolouis</span><span class="gr">@</span><span class="host">bonezegei-linux</span><span class="gr">:</span><span class="path">~</span><span class="dollar">$</span> ` +
+    escHtml(input.value);
+  push(echoHtml);
+
+  rowEl.style.display = 'none';
+
+  if (cmd === 'get /') {
+    /* Show a fake HTTP exchange then reload */
+    push(`<span class="gr">&gt; GET / HTTP/1.1</span>`);
+    push(`<span class="gr">&gt; Host: localhost:8080</span>`);
+    push(`<span class="gr">&gt;</span>`);
+    push(`<span class="ok">&lt; HTTP/1.1 200 OK</span>`);
+    push(`<span class="gr">&lt; Server: BSL-Static-Server/1.0</span>`);
+    push(`<span class="gr">&lt; Content-Type: text/html; charset=utf-8</span>`);
+    push(`<span class="gr">&lt; Connection: close</span>`);
+    push(`<span class="gr">&lt;</span>`);
+    push(`<span class="in">Reloading page...</span>`);
+    setTimeout(() => window.location.reload(), 800);
+  } else if (cmd === '') {
+    showPrompt();
+  } else {
+    push(`<span class="er">bash: ${escHtml(input.value)}: command not found</span>`);
+    push(`<span class="gr">(Only recognized command: <span class="wn">get /</span>)</span>`);
+    setTimeout(showPrompt, 120);
+  }
+});
+
+/* keep focus on input whenever user clicks anywhere */
+document.addEventListener('click', () => { if (rowEl.style.display !== 'none') input.focus(); });
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+/* ════════════════════════════════════════════════════════════════
+   BOOT SEQUENCE KICKOFF
+   ════════════════════════════════════════════════════════════════ */
+(function boot() {
+  /* All kernel lines burst-fire fast (real kernel dumps instantly) */
+  enqueue(KERNEL_LINES, 18, 8);
+  /* pause, then systemd lines at a moderate pace */
+  queue.push({ html: '', delay: 80 });
+  enqueue(SD_LINES, 55, 30);
+
+  runQueue(() => {
+    setTimeout(showLoginBanner, 300);
+  });
+})();
+</script>
+</body>
+</html>

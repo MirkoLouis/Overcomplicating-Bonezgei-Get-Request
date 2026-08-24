@@ -9,13 +9,20 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     /* ── SCREEN ─────────────────────────────────────────────── */
+    @font-face {
+      font-family: 'Ac437 IBM VGA 8x16';
+      src: url('PxPlus_IBM_VGA_8x16.ttf') format('truetype');
+      font-weight: normal;
+      font-style: normal;
+    }
+
     html, body {
       width: 100%; height: 100vh;
       overflow: hidden;             /* NO scrollbar, ever */
       background: #000;
       color: #c8c8c8;
-      font-family: "Courier New", Courier, monospace;
-      font-size: 13px;
+      font-family: 'Ac437 IBM VGA 8x16', monospace;
+      font-size: 16px;
       line-height: 1.45;
     }
 
@@ -33,19 +40,13 @@
 
     /* ── TTY WRAPPER ────────────────────────────────────────── */
     #tty {
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
+      display: block;
       padding: 4px 8px;
     }
 
     /* ── LOG AREA (FIFO viewport) ───────────────────────────── */
     #log {
-      flex: 1 1 auto;
-      overflow: hidden;             /* lines fall off the top */
-      display: flex;
-      flex-direction: column;
-      justify-content: flex-end;   /* content anchored to bottom */
+      display: block;
     }
 
     .line {
@@ -57,7 +58,6 @@
 
     /* ── INPUT ROW (sticky bottom) ───────────────────────────── */
     #input-row {
-      flex: 0 0 auto;
       display: flex;
       align-items: baseline;
       padding-top: 1px;
@@ -114,13 +114,12 @@
 /* ════════════════════════════════════════════════════════════════
    TTY ENGINE
    ════════════════════════════════════════════════════════════════ */
+const __bootTime = Date.now();
+const maxLines = 100;
 const logEl  = document.getElementById('log');
 const rowEl  = document.getElementById('input-row');
 const prompt = document.getElementById('prompt-label');
 const input  = document.getElementById('cmd-input');
-
-/* How many lines to keep visible at once (FIFO trim) */
-const MAX_LINES = Math.floor((window.innerHeight - 28) / (13 * 1.45)) + 4;
 
 /* Push a rendered HTML line into the log area, trim oldest if needed */
 function push(html) {
@@ -128,7 +127,8 @@ function push(html) {
   el.className = 'line';
   el.innerHTML = html;
   logEl.appendChild(el);
-  while (logEl.children.length > MAX_LINES) {
+  const tty = document.getElementById('tty');
+  while (tty.scrollHeight > window.innerHeight && logEl.firstChild) {
     logEl.removeChild(logEl.firstChild);
   }
 }
@@ -331,7 +331,6 @@ const SD_LINES = [
 
 /* BSL server startup lines */
 const BSL_LINES = [
-  '',
   `<span class="gr">─────────────────────────────────────────────────────────────────────</span>`,
   `<span class="in">[BSL]</span> <span class="br">Bonezegei Script Interpreter v1.3.1</span> <span class="gr">(linux x86_64)</span>`,
   `<span class="in">[BSL]</span> loading native: <span class="wn">http/http.so</span> → <span class="ok">OK</span>`,
@@ -362,90 +361,262 @@ function runQueue(onDone) {
 }
 
 /* ════════════════════════════════════════════════════════════════
-   LOGIN BANNER + SHELL PROMPT
+   LOGIN STATE MACHINE
+   States: 'idle' → 'username' → 'password' → 'shell'
    ════════════════════════════════════════════════════════════════ */
+let loginState = 'idle';
+let typedUser  = '';
+
+const VALID_USER = 'mirkolouis';
+const VALID_PASS = '1234';
+
 function showLoginBanner() {
-  push('');
+  /* Wipe every boot log line — real TTY clears the screen when getty takes over */
+  logEl.innerHTML = '';
   push(`<span class="banner">Bonezegei Linux</span> <span class="gr">tty1</span>`);
   push('');
+  setTimeout(startUsernamePrompt, 300);
+}
 
+function startUsernamePrompt() {
+  loginState    = 'username';
+  typedUser     = '';
+  input.type    = 'text';
+  input.value   = '';
+  prompt.innerHTML = `<span class="br">bonezegei-linux login:</span>&nbsp;`;
+  rowEl.style.display = 'flex';
+  input.focus();
+}
+
+function startPasswordPrompt(user) {
+  /* echo the submitted username into the log first */
+  push(`<span class="br">bonezegei-linux login:</span> <span class="user">${escHtml(user)}</span>`);
+  loginState    = 'password';
+  passwordBuffer = '';
+  input.type    = 'text';   /* browser shows nothing because we intercept keys */
+  input.value   = '';
+  prompt.innerHTML = `<span class="br">Password:</span>&nbsp;`;
+  rowEl.style.display = 'flex';
+  input.focus();
+}
+
+function loginIncorrect() {
+  rowEl.style.display = 'none';
   setTimeout(() => {
-    push(`<span class="br">mirkolouis login: </span><span class="user">mirkolouis</span>`);
-    setTimeout(() => {
-      push(`<span class="gr">Last login: Sun Aug 24 06:38:20 2026 on tty1</span>`);
-      setTimeout(() => {
-        push('');
-        /* run BSL server "boot" */
-        const bslQ = BSL_LINES.map(h => ({ html: h, delay: 80 }));
-        queue = bslQ;
-        runQueue(() => {
-          setTimeout(showShell, 300);
-        });
-      }, 400);
-    }, 600);
-  }, 500);
+    push(`<span class="er">Login incorrect</span>`);
+    push('');
+    setTimeout(startUsernamePrompt, 400);
+  }, 300);
+}
+
+function loginSuccess() {
+  rowEl.style.display = 'none';
+  setTimeout(() => {
+    push('');
+    push(`<span class="gr">Last login: Sun Aug 24 06:38:20 2026 on tty1</span>`);
+    const bslQ = BSL_LINES.map(h => ({ html: h, delay: 80 }));
+    queue = bslQ;
+    runQueue(() => { setTimeout(showShell, 300); });
+  }, 350);
 }
 
 function showShell() {
-  push('');
-  /* Build prompt HTML for the log line (already-entered) */
-  const promptHtml =
-    `<span class="user">mirkolouis</span><span class="gr">@</span><span class="host">bonezegei-linux</span><span class="gr">:</span><span class="path">~</span><span class="dollar">$</span> ` +
-    `<span class="wn">bonezegei server.bzg</span>`;
-  push(promptHtml);
-
-  /* Now show the interactive prompt */
+  /* Drop straight into interactive prompt — no "bonezegei server.bzg" echo */
+  loginState = 'shell';
   showPrompt();
 }
 
 function showPrompt() {
+  input.type  = 'text';
+  input.value = '';
   prompt.innerHTML =
     `<span class="user">mirkolouis</span><span class="gr">@</span><span class="host">bonezegei-linux</span><span class="gr">:</span><span class="path">~</span><span class="dollar">$</span>&nbsp;`;
   rowEl.style.display = 'flex';
-  input.value = '';
   input.focus();
 }
 
 /* ════════════════════════════════════════════════════════════════
-   COMMAND HANDLER
+   UNIFIED KEYDOWN — routes by loginState
    ════════════════════════════════════════════════════════════════ */
+let passwordBuffer = '';
+
 input.addEventListener('keydown', (e) => {
+  /* ── PASSWORD ────────────────────────────────────────────── */
+  if (loginState === 'password') {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      rowEl.style.display = 'none';
+      if (typedUser === VALID_USER && passwordBuffer === VALID_PASS) {
+        loginSuccess();
+      } else {
+        loginIncorrect();
+      }
+    } else if (e.key === 'Backspace') {
+      e.preventDefault();
+      passwordBuffer = passwordBuffer.slice(0, -1);
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      e.preventDefault();
+      passwordBuffer += e.key;
+    }
+    return;
+  }
+
   if (e.key !== 'Enter') return;
   e.preventDefault();
 
-  const cmd = input.value.trim().toLowerCase();
+  const val     = input.value;
+  const trimmed = val.trim();
 
-  /* Echo the command typed into the log */
-  const echoHtml =
-    `<span class="user">mirkolouis</span><span class="gr">@</span><span class="host">bonezegei-linux</span><span class="gr">:</span><span class="path">~</span><span class="dollar">$</span> ` +
-    escHtml(input.value);
-  push(echoHtml);
+  /* ── USERNAME ────────────────────────────────────────────── */
+  if (loginState === 'username') {
+    rowEl.style.display = 'none';
+    typedUser = trimmed;
+    if (typedUser === '') {
+      push(`<span class="br">bonezegei-linux login:</span>`);
+      setTimeout(startUsernamePrompt, 200);
+    } else {
+      startPasswordPrompt(typedUser);
+    }
+    return;
+  }
 
-  rowEl.style.display = 'none';
+  /* ── SHELL ───────────────────────────────────────────────── */
+  if (loginState === 'shell') {
+    const cmd = trimmed.toLowerCase();
+    const echoHtml =
+      `<span class="user">mirkolouis</span><span class="gr">@</span><span class="host">bonezegei-linux</span><span class="gr">:</span><span class="path">~</span><span class="dollar">$</span> ` +
+      escHtml(val);
+    push(echoHtml);
+    rowEl.style.display = 'none';
 
-  if (cmd === 'get /') {
-    /* Show a fake HTTP exchange then reload */
-    push(`<span class="gr">&gt; GET / HTTP/1.1</span>`);
-    push(`<span class="gr">&gt; Host: localhost:8080</span>`);
-    push(`<span class="gr">&gt;</span>`);
-    push(`<span class="ok">&lt; HTTP/1.1 200 OK</span>`);
-    push(`<span class="gr">&lt; Server: BSL-Static-Server/1.0</span>`);
-    push(`<span class="gr">&lt; Content-Type: text/html; charset=utf-8</span>`);
-    push(`<span class="gr">&lt; Connection: close</span>`);
-    push(`<span class="gr">&lt;</span>`);
-    push(`<span class="in">Reloading page...</span>`);
-    setTimeout(() => window.location.reload(), 800);
-  } else if (cmd === '') {
-    showPrompt();
-  } else {
-    push(`<span class="er">bash: ${escHtml(input.value)}: command not found</span>`);
-    push(`<span class="gr">(Only recognized command: <span class="wn">get /</span>)</span>`);
-    setTimeout(showPrompt, 120);
+    if (cmd === 'get /') {
+      push(`<span class="gr">&gt; GET / HTTP/1.1</span>`);
+      push(`<span class="gr">&gt; Host: localhost:8080</span>`);
+      push(`<span class="gr">&gt;</span>`);
+      push(`<span class="ok">&lt; HTTP/1.1 200 OK</span>`);
+      push(`<span class="gr">&lt; Server: BSL-Static-Server/1.0</span>`);
+      push(`<span class="gr">&lt; Content-Type: text/html; charset=utf-8</span>`);
+      push(`<span class="gr">&lt; Connection: close</span>`);
+      push(`<span class="gr">&lt;</span>`);
+      push(`<span class="in">Reloading page...</span>`);
+      setTimeout(() => window.location.reload(), 800);
+    } else if (cmd === 'fastfetch') {
+      showFastfetch(() => {
+        setTimeout(showPrompt, 120);
+      });
+    } else if (cmd === 'btw') {
+      push(`<span class="in">I use nixos btw</span>`);
+      setTimeout(showPrompt, 120);
+    } else if (cmd === '') {
+      showPrompt();
+    } else {
+      push(`<span class="er">bash: ${escHtml(val)}: command not found</span>`);
+      push(`<span class="gr">(Recognized commands: <span class="wn">get /</span>, <span class="wn">fastfetch</span>, <span class="wn">btw</span>)</span>`);
+      setTimeout(showPrompt, 120);
+    }
+    return;
   }
 });
 
-/* keep focus on input whenever user clicks anywhere */
-document.addEventListener('click', () => { if (rowEl.style.display !== 'none') input.focus(); });
+/* Keep focus on input on any click */
+document.addEventListener('click', () => {
+  if (rowEl.style.display !== 'none') input.focus();
+});
+
+/* ════════════════════════════════════════════════════════════════
+   FASTFETCH OUTPUT
+   ════════════════════════════════════════════════════════════════ */
+function showFastfetch(onDone) {
+  /* Info lines — key/value pairs to display next to the logo */
+  const K = 'style="color:#00e5ff"';  /* key colour  */
+  const V = 'style="color:#c8c8c8"';  /* value colour */
+  const H = 'style="color:#eeeeee;font-weight:bold"'; /* header */
+  const S = 'style="color:#767676"';  /* separator   */
+  function formatUptime(ms) {
+    const totalSec = Math.floor(ms / 1000);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    const h = Math.floor(m / 60);
+    const m_rem = m % 60;
+    if (h > 0) return `${h} hours, ${m_rem} mins`;
+    if (m > 0) return `${m} mins, ${s} secs`;
+    return `${s} secs`;
+  }
+  const currentUptime = formatUptime(Date.now() - __bootTime);
+
+  const INFO_HTML = [
+    `<span ${H}>mirkolouis@bonezegei-linux</span>`,
+    `<span ${S}>-----------------------</span>`,
+    `<span ${K}>OS</span><span ${S}>:</span> <span ${V}>NixOS 26.11 (Zokor) x86_64</span>`,
+    `<span ${K}>Host</span><span ${S}>:</span> <span ${V}>F117-7</span>`,
+    `<span ${K}>Kernel</span><span ${S}>:</span> <span ${V}>Linux 7.1.8-cachyos</span>`,
+    `<span ${K}>Uptime</span><span ${S}>:</span> <span ${V}>${currentUptime}</span>`,
+    `<span ${K}>Packages</span><span ${S}>:</span> <span ${V}>46 (flatpak-system), 10 (flatpak-user), 1942 (nix-system), 191 (nix-user)</span>`,
+    `<span ${K}>Shell</span><span ${S}>:</span> <span ${V}>fish 4.8.1</span>`,
+    `<span ${K}>Display (BOE0910)</span><span ${S}>:</span> <span ${V}>1920x1080 @ 1.25x in 16", 144 Hz [Built-in]</span>`,
+    `<span ${K}>Display (LS24DG30X)</span><span ${S}>:</span> <span ${V}>1920x1080 in 24", 180 Hz [External, HDR] *</span>`,
+    `<span ${K}>DE</span><span ${S}>:</span> <span ${V}>KDE Plasma 6.7.4</span>`,
+    `<span ${K}>WM</span><span ${S}>:</span> <span ${V}>KWin (Wayland)</span>`,
+    `<span ${K}>WM Theme</span><span ${S}>:</span> <span ${V}>Dracula</span>`,
+    `<span ${K}>Theme</span><span ${S}>:</span> <span ${V}>Breeze (DraculaPurple) [Qt], Breeze-Dark [GTK2], Breeze [GTK3/4]</span>`,
+    `<span ${K}>Icons</span><span ${S}>:</span> <span ${V}>breeze-dark [Qt], Adwaita [GTK2], breeze-dark [GTK3/4]</span>`,
+    `<span ${K}>Font</span><span ${S}>:</span> <span ${V}>PxPlus IBM VGA 8x16 (12pt) (11pt) [Qt], PxPlus IBM VGA 8x16 (12pt) (11pt) [GTK2/3/4]</span>`,
+    `<span ${K}>Cursor</span><span ${S}>:</span> <span ${V}>Future-dark (24px)</span>`,
+    `<span ${K}>Terminal</span><span ${S}>:</span> <span ${V}>kitty 0.48.2</span>`,
+    `<span ${K}>Terminal Font</span><span ${S}>:</span> <span ${V}>PxPlus IBM VGA 8x16 (12pt)</span>`,
+    `<span ${K}>CPU</span><span ${S}>:</span> <span ${V}>11th Gen Intel(R) Core(TM) i5-11260H (12) @ 4.40 GHz</span>`,
+    `<span ${K}>GPU 1</span><span ${S}>:</span> <span ${V}>NVIDIA GeForce RTX 3050 Ti Mobile [Discrete]</span>`,
+    `<span ${K}>GPU 2</span><span ${S}>:</span> <span ${V}>Intel UHD Graphics @ 1.40 GHz [Integrated]</span>`,
+    `<span ${K}>Memory</span><span ${S}>:</span> <span ${V}>10.40 GiB / 15.40 GiB (68%)</span>`,
+    `<span ${K}>Swap</span><span ${S}>:</span> <span ${V}>Disabled</span>`,
+    `<span ${K}>Disk (/)</span><span ${S}>:</span> <span ${V}>282.93 GiB / 466.82 GiB (61%) - ext4</span>`,
+    `<span ${K}>Disk (/mnt/LinuxPart)</span><span ${S}>:</span> <span ${V}>312.63 GiB / 548.95 GiB (57%) - ext4</span>`,
+    `<span ${K}>Disk (/mnt/WindowsPart)</span><span ${S}>:</span> <span ${V}>265.07 GiB / 371.91 GiB (71%) - fuseblk</span>`,
+    `<span ${K}>Local IP (wlp0s20f3)</span><span ${S}>:</span> <span ${V}>192.168.1.17/24</span>`,
+    `<span ${K}>Locale</span><span ${S}>:</span> <span ${V}>en_US.UTF-8</span>`
+  ];
+
+  fetch('frover.txt')
+    .then(r => r.text())
+    .then(text => {
+      const logoLines = text.split('\n');
+      const OFFSET = 2; /* Shift logo down 2 lines so it starts at OS */
+      const maxLines = Math.max(logoLines.length + OFFSET, INFO_HTML.length);
+      const PAD = 4;
+
+      for (let i = 0; i < maxLines; i++) {
+        let logoStr = '';
+        if (i >= OFFSET) {
+          logoStr = logoLines[i - OFFSET] !== undefined ? logoLines[i - OFFSET] : '';
+          logoStr = logoStr.replace(/\r$/, '');
+        }
+        
+        if (logoStr.length < 51) {
+          logoStr += '\u2800'.repeat(51 - logoStr.length);
+        }
+
+        const infoHtml = INFO_HTML[i] !== undefined ? INFO_HTML[i] : '';
+
+        if (i >= logoLines.length + OFFSET - 1 && logoStr.trim() === '' && !infoHtml) continue;
+
+        const el = document.createElement('span');
+        el.className = 'line';
+        el.style.whiteSpace = 'pre';
+        el.innerHTML = `<span style="color:#7ebae4">${escHtml(logoStr)}</span>` + ' '.repeat(PAD) + infoHtml;
+        logEl.appendChild(el);
+
+        const tty = document.getElementById('tty');
+        while (tty.scrollHeight > window.innerHeight && logEl.firstChild) {
+          logEl.removeChild(logEl.firstChild);
+        }
+      }
+      if (onDone) onDone();
+    })
+    .catch(err => {
+      push(`<span class="er">fastfetch: failed to load ascii art</span>`);
+      if (onDone) onDone();
+    });
+}
 
 function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -455,11 +626,14 @@ function escHtml(s) {
    BOOT SEQUENCE KICKOFF
    ════════════════════════════════════════════════════════════════ */
 (function boot() {
-  /* All kernel lines burst-fire fast (real kernel dumps instantly) */
-  enqueue(KERNEL_LINES, 18, 8);
-  /* pause, then systemd lines at a moderate pace */
+  /* 103 kernel lines × 15ms = 1545ms
+     gap 80ms
+     67 systemd lines × 49ms = 3283ms
+     ─────────────────────────────────
+     total ≈ 4908ms  (~5 seconds, no jitter so it's always exact) */
+  enqueue(KERNEL_LINES, 15, 0);
   queue.push({ html: '', delay: 80 });
-  enqueue(SD_LINES, 55, 30);
+  enqueue(SD_LINES, 49, 0);
 
   runQueue(() => {
     setTimeout(showLoginBanner, 300);

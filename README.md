@@ -1,5 +1,7 @@
 # Overcomplicating a Bonezegei GET Request
 
+> **Moved:** this project now lives in [MirkoLouis/ITE183/extra-bonezegei-get-request](https://github.com/MirkoLouis/ITE183/tree/main/extra-bonezegei-get-request). This repository is archived.
+
 ## The Bonezegei Scripting Language (BSL)
 The [Bonezegei Scripting Language (BSL)](https://github.com/bonezegei/Bonezegei_Scripting_Language) is a minimalistic, esoteric scripting language utilized in this project to strictly handle the backend operations. By design, BSL acts as a bare-bones environment. In this project, BSL is used to load a native C-like extension (`http/http.so`), manually register an HTTP server (`createHTTPServer()`), and bind a `select()` event loop to port `8080`. Its sole responsibility is to serve static payloads out of the `./public` directory.
 
